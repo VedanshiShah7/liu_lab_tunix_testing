@@ -1,6 +1,6 @@
 # Tunix: A JAX-native LLM Post-Training Library
 
-**Tunix(Tune-in-JAX)** is a JAX based library designed to streamline the
+**Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
  post-training of Large Language Models. It provides efficient and scalable
  supports for:
 
@@ -42,12 +42,12 @@ Tunix is still under development, here's a glimpse of the current features:
 ## Upcoming
 
 * **Advanced Algorithms:**
-    * Addtional state-of-the-art RL and distillation algorithms
+    * Additional state-of-the-art RL and distillation algorithms
 * **Scalability:**
     * Distributed training for large models
     * Efficient inference support for RL workflow
 * **Accelerator:**
-    * Efficient execution on GPU.
+    * Efficient execution on GPU
 * **User Guides:**
     * Comprehensive onboarding materials and example notebooks
 
@@ -62,7 +62,7 @@ pip install git+https://github.com/google/tunix
 
 ## Getting Started
 
-To get started, we have a bunch of detailed examples and tutorials.
+To get started, we have a bunch of detailed examples and tutorials:
 
 - [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_demo.ipynb)
 - [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_demo.ipynb)
@@ -74,8 +74,8 @@ future.
 
 We welcome contributions! As Tunix is in early development, the contribution
 process is still being formalized. In the meantime, you can make feature
-requests, report issues and ask questions in our [Tunix GitHub discussion
-forum](https://github.com/google/tunix/discussions).
+requests, report issues and ask questions in our Tunix GitHub discussion
+forum.
 
 ## Stay Tuned!
 
