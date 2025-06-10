@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utils for loading and converting Qwen3 PT weights."""
+"""Utils for loading and converting Llama3 PT weights."""
 
 import re
 from etils import epath
 from flax import nnx
 import jax
 import safetensors.flax as safetensors
-from tunix.models.qwen3 import model as model_lib
+from tunix.models.llama3 import model as model_lib
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
@@ -131,8 +131,8 @@ def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
-) -> model_lib.Qwen3:
-  """Load tensors from the safetensors file and create a Qwen3 model."""
+) -> model_lib.Llama3:
+  """Load tensors from the safetensors file and create a Llama3 model."""
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
   if not files:
@@ -142,11 +142,11 @@ def create_model_from_safe_tensors(
   for f in files:
     tensor_dict |= safetensors.load_file(f)
 
-  qwen3 = nnx.eval_shape(
-      lambda: model_lib.Qwen3(config, rngs=nnx.Rngs(params=0))
+  llama3 = nnx.eval_shape(
+      lambda: model_lib.Llama3(config, rngs=nnx.Rngs(params=0))
   )
 
-  graph_def, abs_state = nnx.split(qwen3)
+  graph_def, abs_state = nnx.split(llama3)
   state_dict = abs_state.to_pure_dict()
 
   for k, v in tensor_dict.items():

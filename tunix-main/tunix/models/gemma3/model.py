@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gemma transformer."""
+"""Gemma3 model."""
 
-from collections.abc import Iterable
 import dataclasses
 import enum
-from typing import Any, Callable, Self, Tuple
+import itertools
+from typing import Tuple
 import flax
 from flax import nnx
 import jax
@@ -25,7 +25,6 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-from tunix.models.gemma import params as params_lib
 
 
 LayerCache = dict[str, jaxtyping.Array]
@@ -64,6 +63,106 @@ class ShardingConfig:
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
+    )
+
+
+class QueryPreAttentionNormalisation(enum.Enum):
+  """Initialization strategy."""
+
+  # Whether to scale the query by 1/sqrt(head_dim)
+  BY_ONE_OVER_SQRT_HEAD_DIM = enum.auto()
+
+  # Whether to scale the query by `1/sqrt(embed_dim // num_heads)`
+  BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS = enum.auto()
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Gemma3Config:
+  """Transformer config."""
+
+  num_layers: int
+  num_embed: int
+  embed_dim: int
+  hidden_dim: int
+  num_heads: int
+  head_dim: int
+  num_kv_heads: int
+  sliding_window_size: int | None = None
+  local_base_frequency: int = 10_000
+  global_base_frequency: int = 10_000
+  local_scale_factor: float = 1.0
+  global_scale_factor: float = 1.0
+  query_pre_attn_norm: QueryPreAttentionNormalisation = (
+      QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM
+  )
+  shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
+
+  @classmethod
+  def gemma3_1b(cls) -> 'Gemma3Config':
+    return cls(
+        num_layers=26,
+        num_embed=262144,
+        embed_dim=1152,
+        hidden_dim=6 * 1152,
+        num_heads=4,
+        head_dim=256,
+        num_kv_heads=1,
+        sliding_window_size=512,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+    )
+
+  @classmethod
+  def gemma3_4b(cls) -> 'Gemma3Config':
+    """Gemma3-4B text-only config."""
+    return cls(
+        num_layers=34,
+        num_embed=262_144,
+        embed_dim=2560,
+        hidden_dim=2560 * 8 // 2,
+        num_heads=8,
+        head_dim=256,
+        num_kv_heads=4,
+        sliding_window_size=1024,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        global_scale_factor=8.0,
+    )
+
+  @classmethod
+  def gemma3_12b(cls) -> 'Gemma3Config':
+    """Gemma3-12B text-only config."""
+    return cls(
+        num_layers=48,
+        num_embed=262144,
+        embed_dim=30 * 128,
+        hidden_dim=8 * 30 * 128 // 2,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        query_pre_attn_norm=QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM,
+        sliding_window_size=1024,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        global_scale_factor=8.0,
+    )
+
+  @classmethod
+  def gemma3_27b(cls) -> 'Gemma3Config':
+    """Gemma3-27B text-only config."""
+    return cls(
+        num_layers=62,
+        num_embed=262144,
+        embed_dim=5376,
+        hidden_dim=5376 * 8 // 2,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=16,
+        query_pre_attn_norm=QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS,
+        sliding_window_size=1024,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        global_scale_factor=8.0,
     )
 
 
@@ -139,17 +238,23 @@ class Einsum(nnx.Module):
 def apply_rope(
     inputs: jaxtyping.Array,  # [B, L]
     positions: jaxtyping.Array,  # [B, L]
+    *,
     head_dim: int,
-    max_wavelength: int = 10_000,
+    base_frequency: int,
+    scale_factor: float = 1.0,
 ) -> jaxtyping.Array:
   """Applies RoPE."""
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
-  timescale = max_wavelength**fraction
+  timescale = base_frequency**fraction
 
   sinusoid_inp = (
       positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
   )
   sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
+  if scale_factor < 1.0:
+    raise ValueError(f'scale_factor must be >= 1.0, got {scale_factor}')
+  sinusoid_inp /= scale_factor
+
   sin = jnp.sin(sinusoid_inp)
   cos = jnp.cos(sinusoid_inp)
 
@@ -168,21 +273,33 @@ class AttentionType(enum.Enum):
   LOCAL_SLIDING = 2
 
 
+GEMMA3_ATTENTION_PATTERN = (
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.GLOBAL,
+)
+
+
 class Attention(nnx.Module):
   """Attention module."""
 
   def __init__(
       self,
+      *,
       num_heads: int,
       num_kv_heads: int,
       features: int,
       head_dim: int,
       attn_type: AttentionType,
-      *,
       rngs: nnx.Rngs,
-      sliding_window_size: int | None = None,
-      attn_logits_soft_cap: float | None = None,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      sliding_window_size: int | None,
+      rope_base_frequency: int,
+      rope_scale_factor: float,
+      query_pre_attn_norm: QueryPreAttentionNormalisation,
+      shd_config: ShardingConfig,
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
       raise ValueError(
@@ -191,7 +308,9 @@ class Attention(nnx.Module):
 
     self.sliding_window_size = sliding_window_size
     self.attn_type = attn_type
-    self.attn_logits_soft_cap = attn_logits_soft_cap
+    self.rope_base_frequency = rope_base_frequency
+    self.rope_scale_factor = rope_scale_factor
+    self.query_pre_attn_norm = query_pre_attn_norm
     self.shd_config = shd_config
     self.attn_vec_einsum = Einsum(
         einsum_str='BTNH,NHD->BTD',
@@ -221,6 +340,9 @@ class Attention(nnx.Module):
           if num_kv_heads == 1
           else shd_config.kv_weight_cndh,
       )
+    # No sharding on head_dim.
+    self._query_norm = RMSNorm(head_dim, rngs=rngs)
+    self._key_norm = RMSNorm(head_dim, rngs=rngs)
 
   @jax.named_scope('attention')
   def __call__(
@@ -242,16 +364,23 @@ class Attention(nnx.Module):
     key_proj = shard(key_proj, self.shd_config.act_btnh)
     value_proj = shard(value_proj, self.shd_config.act_btnh)
 
+    query_proj = self._query_norm(query_proj)
+    key_proj = self._key_norm(key_proj)
+
     query_proj = apply_rope(
         query_proj,
         segment_pos,
         head_dim=self.head_dim,
+        base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
     )
-    query_scaled = query_proj * self.head_dim**-0.5
+    query_scaled = query_proj * self.query_pre_attn_scalar
     key_proj = apply_rope(
         key_proj,
         segment_pos,
         head_dim=self.head_dim,
+        base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
     )
 
     # Cache is left aligned.
@@ -280,10 +409,6 @@ class Attention(nnx.Module):
       # [batch_size, seq_len, num_heads, cache_size]
       # If cache is None, then cache_size = seq_len.
       logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
-
-    if self.attn_logits_soft_cap is not None:
-      logits = jnp.tanh(logits / self.attn_logits_soft_cap)
-      logits = logits * self.attn_logits_soft_cap
 
     if self.attn_type == AttentionType.LOCAL_SLIDING:
       all_ones = jnp.ones_like(attn_mask)
@@ -328,6 +453,20 @@ class Attention(nnx.Module):
     return self.attn_vec_einsum.shape[1]
 
   @property
+  def features(self):
+    return self.attn_vec_einsum.shape[2]
+
+  @property
+  def query_pre_attn_scalar(self):
+    match self.query_pre_attn_norm:
+      case QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM:
+        return self.head_dim**-0.5
+      case (
+          QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS
+      ):
+        return (self.features // self.num_heads) ** -0.5
+
+  @property
   def num_heads(self):
     return (
         self.qkv_einsum.shape[1]
@@ -350,24 +489,6 @@ class Attention(nnx.Module):
   @property
   def use_gqa(self):
     return self.num_kv_heads != self.num_heads and self.num_kv_heads > 1
-
-  def init_cache(
-      self,
-      cache_size: int,
-      batch_size: int,
-      dtype: jnp.dtype = jnp.bfloat16,
-  ) -> LayerCache:
-    return {
-        'v': jnp.zeros(
-            (batch_size, cache_size, self.num_kv_heads, self.head_dim),
-            dtype=dtype,
-        ),
-        'k': jnp.zeros(
-            (batch_size, cache_size, self.num_kv_heads, self.head_dim),
-            dtype=dtype,
-        ),
-        'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
-    }
 
 
 class FeedForward(nnx.Module):
@@ -429,22 +550,22 @@ class Block(nnx.Module):
 
   def __init__(
       self,
+      *,
       num_heads: int,
       num_kv_heads: int,
       embed_dim: int,
       head_dim: int,
       hidden_dim: int,
-      use_post_attn_norm: bool,
-      use_post_ffw_norm: bool,
       attn_type: AttentionType,
-      *,
       rngs: nnx.Rngs,
-      attn_logits_soft_cap: float | None,
-      sliding_window_size: int | None = None,
+      sliding_window_size: int | None,
+      rope_base_frequency: int,
+      rope_scale_factor: float,
+      query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.pre_attention_norm = RMSNorm(
-        embed_dim, rngs=rngs, shd_config=shd_config
+        embed_dim, rngs=rngs, sharding=shd_config.rms_norm_weight
     )
     self.attn = Attention(
         num_heads=num_heads,
@@ -452,23 +573,28 @@ class Block(nnx.Module):
         features=embed_dim,
         head_dim=head_dim,
         attn_type=attn_type,
-        attn_logits_soft_cap=attn_logits_soft_cap,
         sliding_window_size=sliding_window_size,
+        rope_base_frequency=rope_base_frequency,
+        rope_scale_factor=rope_scale_factor,
+        query_pre_attn_norm=query_pre_attn_norm,
         rngs=rngs,
         shd_config=shd_config,
     )
-    if use_post_attn_norm:
-      self.post_attn_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
-
-    self.pre_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    self.post_attention_norm = RMSNorm(
+        embed_dim, rngs=rngs, sharding=shd_config.rms_norm_weight
+    )
+    self.pre_ffw_norm = RMSNorm(
+        embed_dim, rngs=rngs, sharding=shd_config.rms_norm_weight
+    )
     self.mlp = FeedForward(
         features=embed_dim,
         hidden_dim=hidden_dim,
         rngs=rngs,
         shd_config=shd_config,
     )
-    if use_post_ffw_norm:
-      self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    self.post_ffw_norm = RMSNorm(
+        embed_dim, rngs=rngs, sharding=shd_config.rms_norm_weight
+    )
 
   def __call__(
       self,
@@ -484,40 +610,16 @@ class Block(nnx.Module):
         cache,
         attn_mask,
     )
-
-    if self.use_post_attn_norm:
-      attn_output = self.post_attn_norm(attn_output)
+    attn_output = self.post_attention_norm(attn_output)
 
     attn_output += x
 
     outputs = self.pre_ffw_norm(attn_output)
     outputs = self.mlp(outputs)
-
-    if self.use_post_ffw_norm:
-      outputs = self.post_ffw_norm(outputs)
+    outputs = self.post_ffw_norm(outputs)
 
     outputs += attn_output
     return cache, outputs
-
-  @property
-  def use_post_attn_norm(self):
-    return hasattr(self, 'post_attn_norm') and self.post_attn_norm is not None
-
-  @property
-  def use_post_ffw_norm(self):
-    return hasattr(self, 'post_ffw_norm') and self.post_ffw_norm is not None
-
-  def init_cache(
-      self,
-      cache_size: int,
-      batch_size: int,
-      dtype: jnp.dtype = jnp.bfloat16,
-  ) -> LayerCache:
-    return self.attn.init_cache(
-        cache_size=cache_size,
-        batch_size=batch_size,
-        dtype=dtype,
-    )
 
 
 class RMSNorm(nnx.Module):
@@ -528,11 +630,11 @@ class RMSNorm(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      sharding: tuple[str, ...] = (),
   ):
     self.scale = nnx.Param(
         nnx.initializers.zeros_init()(rngs.params(), dim),
-        sharding=shd_config.rms_norm_weight,
+        sharding=sharding,
     )
 
   @jax.named_scope('rms_norm')
@@ -548,256 +650,15 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-@dataclasses.dataclass(frozen=True)
-class TransformerConfig:
-  """Configuration for the gemma transformer."""
-
-  num_layers: int
-  num_embed: int
-  embed_dim: int
-  hidden_dim: int
-  num_heads: int
-  head_dim: int
-  num_kv_heads: int
-  final_logit_softcap: float | None
-  use_post_attn_norm: bool
-  use_post_ffw_norm: bool
-  attention_types: Iterable[AttentionType]
-  attn_logits_soft_cap: float | None = None
-  sliding_window_size: int | None = None
-  shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
-
-  @classmethod
-  def gemma_2b(cls):
-    num_layers = 18
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=2048,
-        hidden_dim=16384,
-        num_heads=8,
-        head_dim=256,
-        num_kv_heads=1,
-        final_logit_softcap=None,
-        attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=False,
-        use_post_ffw_norm=False,
-    )
-
-  @classmethod
-  def gemma_7b(cls):
-    num_layers = 28
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=3072,
-        hidden_dim=24576,
-        num_heads=16,
-        head_dim=256,
-        num_kv_heads=16,
-        final_logit_softcap=None,
-        attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=False,
-        use_post_ffw_norm=False,
-    )
-
-  @classmethod
-  def gemma2_2b(cls):
-    num_layers = 26
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=2304,
-        hidden_dim=9216,
-        num_heads=8,
-        head_dim=256,
-        num_kv_heads=4,
-        final_logit_softcap=30.0,
-        attention_types=(
-            AttentionType.LOCAL_SLIDING,
-            AttentionType.GLOBAL,
-        )
-        * int(num_layers / 2),
-        use_post_attn_norm=True,
-        use_post_ffw_norm=True,
-        attn_logits_soft_cap=50.0,
-        sliding_window_size=4096,
-    )
-
-  @classmethod
-  def gemma2_9b(cls):
-    num_layers = 42
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=3584,
-        hidden_dim=28672,
-        num_heads=16,
-        head_dim=256,
-        num_kv_heads=8,
-        final_logit_softcap=30.0,
-        attention_types=(
-            AttentionType.LOCAL_SLIDING,
-            AttentionType.GLOBAL,
-        )
-        * int(num_layers / 2),
-        use_post_attn_norm=True,
-        use_post_ffw_norm=True,
-        attn_logits_soft_cap=50.0,
-        sliding_window_size=4096,
-    )
-
-
-def _flatten_path(path: tuple[str | int, ...]) -> str:
-  def f(item) -> str:
-    if isinstance(item, str):
-      return f'{item}'
-    elif isinstance(item, int):
-      return f'[{item}]'
-    else:
-      raise ValueError(f'Unexpected type {type(item)}')
-
-  return '.'.join([f(item) for item in path]).replace('.[', '[')
-
-
-def module_from_linen_variables(
-    module_factory: Callable[[], nnx.Module],
-    variables: flax.typing.VariableDict,
-    map_key_fn: None | (
-        Callable[[tuple[str, ...]], tuple[str | int, ...]]
-    ) = None,
-    assign_val_fn: None | (
-        Callable[
-            [
-                dict[tuple[str, ...], Any],
-                tuple[str | int, ...],
-                flax.typing.VariableDict,
-            ],
-            dict[tuple[str, ...], Any],
-        ]
-    ) = None,
-) -> nnx.Module:
-  """Returns an `nnx.Module` initialized with the `variables` of a linen module.
-
-  Args:
-    module_factory: A no-args callable that returns an `nnx.Module`.
-    variables: A dictionary of variables.
-    map_key_fn: An optional function for mapping keys in the `variables`
-      dictionary to keys in the `nnx.Module`'s state. If not provided it is
-      assumed that after removing the collection name the keys in the
-      `variables` dictionary are the same as the keys in the `nnx.Module`'s
-      state.
-    assign_val_fn: An optional function for assigning values in the `variables`
-      dictionary to keys in the `nnx.Module`'s state. If not provided it is
-      assumed that the values in the `variables` dictionary are the same as the
-      values in the `nnx.Module`'s state.
-
-  Returns:
-    An `nnx.Module` initialized with the `variables` of a linen module.
-  """
-  if map_key_fn is None:
-
-    def map_key_fn(path: tuple[str, ...]) -> tuple[str | int, ...]:
-      return path[1:] if 'params' in variables else path
-
-  if assign_val_fn is None:
-
-    def assign_val_fn(
-        state: dict[tuple[str, ...], Any],
-        mapped_path: tuple[str | int, ...],
-        val: Any,
-    ) -> dict[tuple[str, ...], Any]:
-      state[mapped_path].value = val
-      return state
-
-  mdl: nnx.Module = nnx.eval_shape(module_factory)
-  graph_def, state = nnx.split(mdl)
-  state = dict(state.flat_state())
-  for path, val in flax.traverse_util.flatten_dict(variables).items():
-    mapped_path = map_key_fn(path)
-    if mapped_path not in state:
-      raise ValueError(
-          f"'{mdl.__class__.__name__}.{_flatten_path(mapped_path)}' doesn't "
-          f' exist (original path={path}).'
-      )
-    state = assign_val_fn(state, mapped_path, val)
-  state = nnx.State.from_flat_path(state)
-
-  return nnx.merge(graph_def, state)
-
-
-def _map_linen_var_names(key: tuple[str, ...]) -> tuple[str | int, ...]:
-  """Maps linen variable names to nnx variable names."""
-  new_key = []
-  for k in key:
-    if k.startswith('layer_'):
-      prefix, suffix = k.split('layer_')
-      assert not prefix, prefix
-      new_key.append('layers')
-      new_key.append(int(suffix))
-    elif k == 'gating_einsum':
-      new_key.append('gate_proj')
-      new_key.append('kernel')
-    elif k == 'linear':
-      new_key.append('down_proj')
-      new_key.append('kernel')
-    elif k == 'post_attention_norm':
-      new_key.append('post_attn_norm')
-    else:
-      new_key.append(k)
-
-  return tuple(new_key)
-
-
-def _assign_linen_params_to_nnx_state(
-    state: dict[tuple[str, ...], Any],
-    mapped_path: tuple[str | int, ...],
-    val: Any,
-) -> dict[tuple[str, ...], Any]:
-  if 'gate_proj' in mapped_path:
-    state[mapped_path].value = val[0]
-    state[mapped_path[:-2] + ('up_proj', 'kernel')].value = val[1]
-  else:
-    state[mapped_path].value = val
-  return state
-
-
-class Transformer(nnx.Module):
+class Gemma3(nnx.Module):
   """Gemma transformer."""
 
-  @classmethod
-  def from_params(cls, params: params_lib.Params, version: str) -> Self:
-
-    if version in ['2b', '2b-it', '1.1-2b-it']:
-      config = TransformerConfig.gemma_2b()
-    elif version in ['7b', '7b-it', '1.1-7b-it']:
-      config = TransformerConfig.gemma_7b()
-    elif version in ['2-2b', '2-2b-it']:
-      config = TransformerConfig.gemma2_2b()
-    elif version in ['2-9b', '2-9b-it']:
-      config = TransformerConfig.gemma2_9b()
-    else:
-      raise ValueError(f'Unsupported version: {version}')
-
-    return module_from_linen_variables(
-        module_factory=lambda: cls(config, rngs=nnx.Rngs(params=0)),
-        variables=params['transformer'],
-        map_key_fn=_map_linen_var_names,
-        assign_val_fn=_assign_linen_params_to_nnx_state,
-    )
-
-  def __init__(
-      self,
-      config: TransformerConfig,
-      *,
-      rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ):
+  def __init__(self, config: Gemma3Config, *, rngs: nnx.Rngs):
     self.embedder = Embedder(
         vocab_size=config.num_embed,
         embed_dim=config.embed_dim,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
     )
     self.layers = [
         Block(
@@ -807,21 +668,24 @@ class Transformer(nnx.Module):
             head_dim=config.head_dim,
             hidden_dim=config.hidden_dim,
             sliding_window_size=config.sliding_window_size,
-            use_post_attn_norm=config.use_post_attn_norm,
-            use_post_ffw_norm=config.use_post_ffw_norm,
-            attn_logits_soft_cap=config.attn_logits_soft_cap,
             attn_type=attn_type,
+            rope_base_frequency=config.local_base_frequency
+            if attn_type == AttentionType.LOCAL_SLIDING
+            else config.global_base_frequency,
+            rope_scale_factor=config.local_scale_factor
+            if attn_type == AttentionType.LOCAL_SLIDING
+            else config.global_scale_factor,
+            query_pre_attn_norm=config.query_pre_attn_norm,
             rngs=rngs,
-            shd_config=shd_config,
+            shd_config=config.shd_config,
         )
         for _, attn_type in zip(
-            range(config.num_layers), config.attention_types
+            range(config.num_layers), itertools.cycle(GEMMA3_ATTENTION_PATTERN)
         )
     ]
     self.final_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, shd_config=shd_config
+        config.embed_dim, rngs=rngs, sharding=config.shd_config.rms_norm_weight
     )
-    self.final_logits_softcap = config.final_logit_softcap
 
   def __call__(
       self,
@@ -868,9 +732,6 @@ class Transformer(nnx.Module):
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
     logits = self.embedder.decode(x)
 
-    if self.final_logits_softcap is not None:
-      logits /= self.final_logits_softcap
-      logits = jnp.tanh(logits) * self.final_logits_softcap
     return logits, new_cache  # pytype: disable=bad-return-type
 
   @property
@@ -884,83 +745,3 @@ class Transformer(nnx.Module):
   @property
   def num_layers(self) -> int:
     return len(self.layers)
-
-  def init_cache(
-      self,
-      cache_size: int,
-      batch_size: int,
-      dtype: jnp.dtype = jnp.bfloat16,
-  ) -> Cache:
-    """Initializes a new Transformer cache."""
-    return {
-        f'layer_{i}': (
-            self.layers[i].init_cache(
-                cache_size=cache_size,
-                batch_size=batch_size,
-                dtype=dtype,
-            )
-        )
-        for i in range(self.num_layers)
-    }
-
-  def get_model_input(self):
-    """Returns a dummy model input for the transformer.
-
-    This dummy input has a batch size compatible with FSDP sharding on a
-    2-device axis.
-    """
-    dummy_batch_size = 2
-    dummy_seq_len = 1
-    return {
-        'last_tokens': jnp.ones(
-            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
-        ),
-        'positions': jnp.ones(
-            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
-        ),
-        'cache': None,
-        'attention_mask': jnp.ones(
-            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
-        ),
-    }
-
-
-def make_causal_attn_mask(
-    input_mask: jax.Array,  # Shape [B, L]
-) -> jax.Array:
-  """Makes a causal attention mask.
-
-  I.e., as in middle diagram of Figure 3 in https://arxiv.org/pdf/1910.10683.
-
-  Args:
-    input_mask: Input mask for the input. True for non-padded tokens only, else
-      False.
-
-  Returns:
-    Attention mask of shape [B, L, L] (where B=batch dim and L=sequence dim).
-  """
-  if len(input_mask.shape) != 2:
-    raise ValueError(
-        f'Input mask must be 2D (shape [B, L]), but got {input_mask.shape}.'
-    )
-  seq_len = input_mask.shape[-1]
-  causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool))
-  attn_mask = input_mask[..., None, :]
-  attn_mask *= causal_mask[None, ...]
-  return attn_mask
-
-
-def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
-  """Computes the `positions` from the `input_mask`.
-
-  Args:
-    input_mask: The tokens `input_mask`, True for non-padded tokens only.
-
-  Returns:
-    The indices to use for RoPE and absolute position encodings for the given
-    input mask.
-  """
-  positions = jnp.cumsum(input_mask, axis=-1)
-  # Subtract one for all positions from the first valid one as they are
-  # 0-indexed
-  return positions - (positions >= 1)

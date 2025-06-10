@@ -18,7 +18,6 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
-import jax.numpy as jnp
 import numpy as np
 from tunix.generate import sampler as sampler_lib
 from tunix.tests import test_common as tc
@@ -140,6 +139,39 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
+  def test_prompt_padding_bucketization(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)
+    sampler(
+        ['input', 'hello'],
+        total_generation_steps=10,
+    )
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)
+
+    sampler(
+        ['input input input input input', 'hello hello'],
+        total_generation_steps=10,
+    )
+
+    sampler(
+        ['input input input input input input', 'hello hello'],
+        total_generation_steps=10,
+    )
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
@@ -258,53 +290,6 @@ class SamplerTest(parameterized.TestCase):
     )
     with self.assertRaisesRegex(ValueError, '.*must have the same structure.*'):
       sampler.transformer_state = nnx.variables(new_transformer, nnx.LoRAParam)
-
-  def test_compute_attention_mask(self):
-    # Check that the input mask is correctly applied when total sampling steps
-    # is lower than the max cache length.
-    input_mask = jnp.array([[1, 1, 0, 0, 0], [1, 1, 0, 1, 0]], dtype=jnp.bool_)
-    seq_len = 8
-    time_step = jnp.asarray(4, dtype=jnp.int32)
-    attn_mask = sampler_lib._compute_attention_masks(
-        time_step, seq_len, input_mask
-    )
-    expected_attn_mask = jnp.array(
-        [[0, 0, 1, 1, 1, 0, 0, 0], [0, 0, 1, 0, 1, 0, 0, 0]], dtype=jnp.bool_
-    )
-
-    self.assertTrue((attn_mask.squeeze(1) == expected_attn_mask).all())
-
-    # Check that the input mask is correctly applied when total sampling steps
-    # is *longer* than the max cache length.
-    seq_len = 4
-    time_step = jnp.asarray(4, dtype=jnp.int32)
-    attn_mask = sampler_lib._compute_attention_masks(
-        time_step, seq_len, input_mask
-    )
-    expected_attn_mask = jnp.array(
-        [[0, 1, 1, 1], [0, 1, 0, 1]], dtype=jnp.bool_
-    )
-
-    self.assertTrue((attn_mask.squeeze(1) == expected_attn_mask).all())
-
-  def test_make_causal_attn_mask(self):
-    input_mask = jnp.array([[0, 1, 1, 0], [1, 1, 1, 0]])
-    attn_mask = sampler_lib.make_causal_attn_mask(input_mask, 5)
-    expected = jnp.array([
-        [
-            [0, 0, 0, 0, 0],
-            [0, 1, 0, 0, 0],
-            [0, 1, 1, 0, 0],
-            [0, 1, 1, 0, 0],
-        ],
-        [
-            [1, 0, 0, 0, 0],
-            [1, 1, 0, 0, 0],
-            [1, 1, 1, 0, 0],
-            [1, 1, 1, 0, 0],
-        ],
-    ])
-    np.testing.assert_array_equal(attn_mask, expected)
 
 
 if __name__ == '__main__':

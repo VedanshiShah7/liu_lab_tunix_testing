@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen3 model."""
+"""LLama3 model."""
 
 import dataclasses
 from typing import Tuple
@@ -33,7 +33,7 @@ Cache = dict[str, LayerCache]
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
-  """Sharding configuration for Qwen3 model."""
+  """Sharding configuration for Llama3 model."""
 
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
@@ -68,7 +68,7 @@ class ShardingConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ModelConfig:
-  """Configuration for the Qwen3 model."""
+  """Configuration for the Llama3 model."""
 
   num_layers: int
   vocab_size: int
@@ -82,45 +82,17 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
-  def qwen3_0_6_b(cls):  # qwen3-0.6B
+  def llama3_8b(cls):
     return cls(
-        num_layers=28,
-        vocab_size=151936,
-        embed_dim=1024,
-        hidden_dim=3072,
-        num_heads=16,
+        num_layers=32,
+        vocab_size=128256,
+        embed_dim=4096,
+        hidden_dim=14336,
+        num_heads=32,
         head_dim=128,
         num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def qwen3_1_7_b(cls):  # qwen3-1.7B
-    return cls(
-        num_layers=28,
-        vocab_size=151936,
-        embed_dim=2048,
-        hidden_dim=6144,
-        num_heads=16,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def qwen3_14_b(cls):  # qwen3-14B
-    return cls(
-        num_layers=40,
-        vocab_size=151936,
-        embed_dim=5120,
-        hidden_dim=17408,
-        num_heads=40,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
+        norm_eps=1e-05,
+        rope_theta=500_000,
     )
 
 
@@ -269,18 +241,6 @@ class Attention(nnx.Module):
         rngs=rngs,
         sharding=shd_config.o_weight_nhd,
     )
-    self.q_norm = RMSNorm(
-        config.head_dim,
-        norm_eps=config.norm_eps,
-        rngs=rngs,
-        shd_config=shd_config,
-    )
-    self.k_norm = RMSNorm(
-        config.head_dim,
-        norm_eps=config.norm_eps,
-        rngs=rngs,
-        shd_config=shd_config,
-    )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
 
@@ -294,8 +254,8 @@ class Attention(nnx.Module):
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
-    query_proj = self.q_norm(self.q_proj(x))
-    key_proj = self.k_norm(self.k_proj(x))
+    query_proj = self.q_proj(x)
+    key_proj = self.k_proj(x)
     value_proj = self.v_proj(x)
 
     query_proj = shard(query_proj, self.shd_config.act_btnh)
@@ -440,14 +400,14 @@ class DecoderLayer(nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.post_attention_layernorm = RMSNorm(
-        config.embed_dim,
-        norm_eps=config.norm_eps,
+    self.mlp = MLP(
+        config=config,
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.mlp = MLP(
-        config=config,
+    self.post_attention_layernorm = RMSNorm(
+        config.embed_dim,
+        norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=shd_config,
     )
@@ -469,13 +429,12 @@ class DecoderLayer(nnx.Module):
     attn_output += x
     residual = attn_output
     attn_output = self.post_attention_layernorm(attn_output)
-    outputs = self.mlp(attn_output)
-    outputs = residual + outputs
+    outputs = residual + self.mlp(attn_output)
     return cache, outputs
 
 
-class Qwen3(nnx.Module):
-  """Qwen3 model."""
+class Llama3(nnx.Module):
+  """Llama3 model."""
 
   def __init__(
       self,
@@ -513,16 +472,14 @@ class Qwen3(nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
-      output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
-    """Qwen3 model.
+    """Llama3 model.
 
     Args:
       input_tokens: input sequence of tokens.
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
-      output_hidden_states: whether to output the hidden states.
 
     Returns:
       predicted_logits, new_cache
@@ -546,8 +503,6 @@ class Qwen3(nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
-    if output_hidden_states:
-      self.sow(nnx.Intermediate, 'all_hidden_states', x)
     logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type

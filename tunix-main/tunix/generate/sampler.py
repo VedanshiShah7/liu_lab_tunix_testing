@@ -30,9 +30,9 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
-
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -148,121 +148,6 @@ def sample_best(logits):
   next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
   next_token = next_token[:, 0]
   return next_token
-
-
-def sample(
-    logits: jnp.ndarray,
-    eos: int,
-    cache: dict[str, dict[str, jaxtyping.Array]],
-    sampler_state: _SamplingState,
-) -> _SamplingState:
-  """Samples a token from the logits."""
-
-  logits = logits[:, -1][:, None, :]  # B, 1, V
-  decoding_step = sampler_state.decoding_step
-  token_buffer = sampler_state.token_buffer
-  done = sampler_state.done
-  logits_buffer = sampler_state.logits_buffer
-  beam_search_state = sampler_state.beam_search_sampling_state
-
-  if sampler_state.forbidden_token_ids:
-    logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
-
-  if sampler_state.sampling_mode == 'beam_search':
-    beam_search_state, updated_args = beam_search_lib.beam_search_step(
-        logits=logits,
-        done=done,
-        token_buffer=token_buffer,
-        cache=cache,
-        logits_buffer=logits_buffer,
-        state=beam_search_state,
-        pad_token_id=eos,
-        decoding_step=decoding_step,
-    )
-    cache = updated_args['cache']
-    token_buffer = updated_args['token_buffer']
-    done = updated_args['done']
-    logits_buffer = updated_args['logits_buffer']
-  else:
-    if sampler_state.sampling_mode == 'greedy':
-      next_token_candidate = sample_best(logits)
-    elif sampler_state.sampling_mode == 'top_p':
-      key = jax.random.fold_in(sampler_state.seed, decoding_step)
-      next_token_candidate = sample_top_p(
-          logits,
-          key,
-          sampler_state.temperature,
-          sampler_state.sampling_parameters['top_p'],
-          sampler_state.sampling_parameters['top_k'],
-      )
-    else:
-      raise ValueError(
-          'Unsupported sampling mode: %s' % sampler_state.sampling_mode
-      )
-    token_buffer = token_buffer.at[:, decoding_step + 1].set(
-        next_token_candidate
-    )
-
-  done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
-  return _SamplingState(
-      decoding_step=sampler_state.decoding_step + 1,
-      num_input_tokens=sampler_state.num_input_tokens,
-      token_buffer=token_buffer,
-      positions=sampler_state.positions,
-      logits_buffer=logits_buffer,
-      cache=cache,
-      done=done,
-      total_sampling_steps=sampler_state.total_sampling_steps,
-      forbidden_token_ids=sampler_state.forbidden_token_ids,
-      temperature=sampler_state.temperature,
-      sampling_parameters=sampler_state.sampling_parameters,
-      seed=sampler_state.seed,
-      sampling_mode=sampler_state.sampling_mode,
-      beam_search_sampling_state=beam_search_state,
-  )
-
-
-def _compute_attention_masks(
-    time_step: jax.Array, seq_len: int, input_mask: jax.Array
-) -> jax.Array:
-  """Computes causal attention mask."""
-  batch_size = input_mask.shape[0]
-  batch_time_step = jnp.full((batch_size, 1), time_step, dtype=jnp.uint32)
-  causal_padding = jnp.greater(
-      jnp.expand_dims(jnp.arange(seq_len), 0), batch_time_step
-  )
-  max_seq_len = min(input_mask.shape[-1], seq_len)
-  input_mask = jax.lax.dynamic_slice(
-      input_mask,
-      (0, jnp.maximum(time_step - seq_len + 1, 0)),
-      (batch_size, max_seq_len),
-  )
-  input_mask = (
-      jnp.zeros((batch_size, seq_len), dtype=jnp.bool_)
-      .at[:, :max_seq_len]
-      .set(input_mask)
-  )
-
-  causal_padding = jnp.logical_or(causal_padding, input_mask)
-  attention_mask = causal_padding[:, jnp.newaxis, :].astype(jnp.bool_)
-
-  return ~attention_mask
-
-
-def _build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
-  """Computes the `positions` from the `input_mask`.
-
-  Args:
-    input_mask: The tokens `input_mask`, True for non-padded tokens only.
-
-  Returns:
-    The indices to use for RoPE and absolute position encodings for the given
-    input mask.
-  """
-  positions = jnp.cumsum(input_mask, axis=-1)
-  # Subtract one for all positions from the first valid one as they are
-  # 0-indexed
-  return positions - (positions >= 1)
 
 
 def _init_cache(
@@ -440,7 +325,7 @@ class Sampler:
     input_mask = input_mask.at[:, :num_input_tokens].set(
         all_input_ids != self.tokenizer.pad_id()
     )
-    positions = _build_positions_from_mask(input_mask)
+    positions = utils.build_positions_from_mask(input_mask)
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
 
@@ -461,21 +346,21 @@ class Sampler:
     else:
       logits_buffer = None
     sampling_parameters = {}
-    sampling_mode = 'greedy'
-    if beam_size is not None and top_p is not None:
-      raise ValueError(
-          'Cannot use both beam_size and top_p at the same time. Please unset'
-          ' one of them.'
-      )
+    sampling_mode = [None]
+
     if beam_size is not None:
-      sampling_mode = 'beam_search'
+      utils.check_sampling_mode_conflict(sampling_mode, 'beam_search')
       sampling_parameters['beam_size'] = beam_size
-    elif top_p is not None:
-      sampling_mode = 'top_p'
+
+    if top_p is not None:
+      utils.check_sampling_mode_conflict(sampling_mode, 'top_p')
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
 
-    logging.debug('Using sampling mode: %s', sampling_mode)
+    if sampling_mode[0] is None:
+      sampling_mode[0] = 'greedy'
+
+    logging.debug('Using sampling mode: %s', sampling_mode[0])
 
     return _SamplingState(
         decoding_step=num_input_tokens - 1,
@@ -490,7 +375,7 @@ class Sampler:
         temperature=temperature,
         sampling_parameters=sampling_parameters,
         seed=seed,
-        sampling_mode=sampling_mode,
+        sampling_mode=sampling_mode[0],
         beam_search_sampling_state=None,
     )
 
@@ -500,6 +385,77 @@ class Sampler:
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
     input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
     return input_ids
+
+  def _sample(
+      self,
+      logits: jnp.ndarray,
+      eos: int,
+      cache: dict[str, dict[str, jaxtyping.Array]],
+      sampler_state: _SamplingState,
+  ) -> _SamplingState:
+    """Samples a token from the logits."""
+
+    logits = logits[:, -1][:, None, :]  # B, 1, V
+    decoding_step = sampler_state.decoding_step
+    token_buffer = sampler_state.token_buffer
+    done = sampler_state.done
+    logits_buffer = sampler_state.logits_buffer
+    beam_search_state = sampler_state.beam_search_sampling_state
+    if sampler_state.forbidden_token_ids:
+      logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
+
+    if sampler_state.sampling_mode == 'beam_search':
+      beam_search_state, updated_args = beam_search_lib.beam_search_step(
+          logits=logits,
+          done=done,
+          token_buffer=token_buffer,
+          cache=cache,
+          logits_buffer=logits_buffer,
+          state=beam_search_state,
+          pad_token_id=eos,
+          decoding_step=decoding_step,
+      )
+      cache = updated_args['cache']
+      token_buffer = updated_args['token_buffer']
+      done = updated_args['done']
+      logits_buffer = updated_args['logits_buffer']
+    else:
+      if sampler_state.sampling_mode == 'greedy':
+        next_token_candidate = sample_best(logits)
+      elif sampler_state.sampling_mode == 'top_p':
+        key = jax.random.fold_in(sampler_state.seed, decoding_step)
+        next_token_candidate = sample_top_p(
+            logits,
+            key,
+            sampler_state.temperature,
+            sampler_state.sampling_parameters['top_p'],
+            sampler_state.sampling_parameters['top_k'],
+        )
+      else:
+        raise ValueError(
+            'Unsupported sampling mode: %s' % sampler_state.sampling_mode
+        )
+      token_buffer = token_buffer.at[:, decoding_step + 1].set(
+          next_token_candidate
+      )
+
+    done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
+    return _SamplingState(
+        decoding_step=sampler_state.decoding_step + 1,
+        num_input_tokens=sampler_state.num_input_tokens,
+        token_buffer=token_buffer,
+        positions=sampler_state.positions,
+        logits_buffer=logits_buffer,
+        cache=cache,
+        done=done,
+        total_sampling_steps=sampler_state.total_sampling_steps,
+        forbidden_token_ids=sampler_state.forbidden_token_ids,
+        temperature=sampler_state.temperature,
+        sampling_parameters=sampler_state.sampling_parameters,
+        seed=sampler_state.seed,
+        sampling_mode=sampler_state.sampling_mode,
+        beam_search_sampling_state=beam_search_state,
+    )
 
   def _prefill_fn(
       self, params: statelib.State, sampler_state: _SamplingState
@@ -523,7 +479,7 @@ class Sampler:
     )
 
     input_mask = tokens != self.tokenizer.pad_id()
-    attention_mask = make_causal_attn_mask(
+    attention_mask = utils.make_causal_attn_mask(
         input_mask, self.cache_config.cache_size
     )
 
@@ -546,6 +502,7 @@ class Sampler:
       )
     else:
       logits_buffer = sampler_state.logits_buffer
+
     if sampler_state.sampling_mode == 'beam_search':
       # init beam state in prefill instead of init as one minor optimization
       # to avoid running unnecessary prefill for
@@ -583,7 +540,7 @@ class Sampler:
         sampling_mode=sampler_state.sampling_mode,
         beam_search_sampling_state=beam_search_sampling_state,
     )
-    updated_sampler_state = sample(
+    updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
         eos=self.tokenizer.eos_id(),
@@ -622,7 +579,7 @@ class Sampler:
     )
 
     input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
-    attention_mask = _compute_attention_masks(
+    attention_mask = utils.compute_attention_masks(
         decoding_step, self.cache_config.cache_size, input_mask
     )
 
@@ -633,7 +590,7 @@ class Sampler:
         sampler_state.cache,
         attention_mask,
     )
-    updated_sampler_state = sample(
+    updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
         eos=self.tokenizer.eos_id(),
@@ -708,9 +665,9 @@ class Sampler:
     tokens = [self.tokenize(x) for x in input_strings]
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = max_tokens_length
+      max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids = jnp.array([
-        pad_to_length(
+        utils.pad_to_length(
             x,
             target_length=max_prompt_length,
             pad_value=self.tokenizer.pad_id(),
@@ -766,12 +723,12 @@ class Sampler:
     out_logits = []
     for i, token_buffer in enumerate(token_buffers):
       start_idx = (
-          find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
+          utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
           if echo
           else max_prompt_length
       )
       end_idx = (
-          find_first_eos_idx(
+          utils.find_first_eos_idx(
               token_buffer[max_prompt_length:], self.tokenizer.eos_id()
           )
           + max_prompt_length
@@ -791,81 +748,3 @@ class Sampler:
         padded_prompt_tokens=all_input_ids,
     )
     return result
-
-
-def pad_to_length(
-    x: jax.Array,
-    target_length: int,
-    pad_value: int = 0,
-    left=False,
-    axis: int = 0,
-) -> jax.Array:
-  """Pads a JAX array to a specified target length along a given axis.
-
-  Args:
-      x: The JAX array to pad.
-      target_length: The desired length of the padded array.
-      pad_value: The value to use for padding (default: 0).
-      left: If True, add padding tokens to the left of the array.
-      axis: The axis along which to pad (default: 0).
-
-  Returns:
-      A new JAX array that is padded to the target length along the specified
-      axis. Return original array if it is already longer than the target
-      length.
-  """
-  length = x.shape[axis]
-  if length >= target_length:
-    return x
-
-  padding_shape = list(x.shape)
-  padding_shape[axis] = target_length - length
-  padding = jnp.full(padding_shape, pad_value, dtype=x.dtype)
-
-  if left:
-    return jnp.concatenate([padding, x], axis=axis)
-  else:
-    return jnp.concatenate([x, padding], axis=axis)
-
-
-def find_first_non_pad_idx(ids, pad_id):
-  """Finds the index of the first non-pad token."""
-  mask = ids != pad_id
-  if jnp.any(mask):
-    return jnp.argmax(mask)
-  else:
-    return 0
-
-
-def find_first_eos_idx(ids, eos_id):
-  """Finds the index of the first EOS token."""
-  mask = ids == eos_id
-  if jnp.any(mask):
-    return jnp.argmax(mask)
-  else:
-    return ids.shape[0]
-
-
-def make_causal_attn_mask(input_mask: jax.Array, cache_size: int) -> jax.Array:
-  """Create causal attention mask for prefill.
-
-  The causal attention mask during prefill phase is having shape
-  (B, T, CACHE_SIZE).
-
-  Args:
-    input_mask: Mask for the input
-    cache_size: KV cache size
-
-  Returns:
-    Attention mask.
-  """
-  seq_len = input_mask.shape[-1]
-  attn_mask = input_mask[..., None, :]
-  causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-  attn_mask *= causal_mask[None, ...]
-  padding = cache_size - seq_len
-  assert padding >= 0
-  attn_mask = jnp.pad(
-      attn_mask, (*((0, 0) for _ in range(attn_mask.ndim - 1)), (0, padding))
-  )
-  return attn_mask
