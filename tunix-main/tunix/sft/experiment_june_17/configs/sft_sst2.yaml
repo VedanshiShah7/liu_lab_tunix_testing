@@ -1,0 +1,23 @@
+model:
+  type: llama
+  name: meta-llama/Llama-2-7b-hf
+  tokenizer: meta-llama/Llama-2-7b-hf
+
+task:
+  type: classification
+  dataset:
+    train_path: data/sst2/train
+    eval_path: data/sst2/validation
+    num_labels: 2
+
+training:
+  learning_rate: 5e-5
+  batch_size: 16
+  epochs: 3
+  weight_decay: 0.01
+  warmup_steps: 500
+  seed: 42
+
+compute:
+  use_tpu: true
+  tpu_type: v2-8

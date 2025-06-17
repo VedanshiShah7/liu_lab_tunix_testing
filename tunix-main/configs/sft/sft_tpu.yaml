@@ -1,0 +1,26 @@
+# configs/sft/sft_tpu.yaml
+model:
+  name_or_path: "huggyllama/llama-7b"
+  trust_remote_code: true
+
+training:
+  max_steps: 100    # small smoke-test
+  per_device_train_batch_size: 2
+  learning_rate: 2e-5
+  logging_steps: 10
+  save_steps: 50
+
+dataset:
+  name: "alpaca"
+  data_dir: "/mnt/data/alpaca"   # override when calling script
+  input_column: "instruction"
+  output_column: "output"
+
+tpu:
+  use_tpu: true
+  tpu_name: "projects/your-project/locations/us-central1-c/tpus/tpu-v4-8"
+  precision: bf16
+
+output:
+  output_dir: "outputs/sft_alpaca"
+  logging_dir: "outputs/sft_alpaca/logs"

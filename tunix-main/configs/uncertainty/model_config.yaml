@@ -1,0 +1,15 @@
+# configs/uncertainty/model_config.yaml
+model:
+  name_or_path: "huggyllama/llama-7b"
+  trust_remote_code: true
+
+inference:
+  batch_size: 4
+  max_seq_length: 256
+  device: "tpu"        # or "cuda"/"cpu"
+  
+dataset:
+  data_path: "data/sample.jsonl"  
+
+output:
+  output_dir: "outputs/inference"

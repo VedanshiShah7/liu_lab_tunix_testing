@@ -18,7 +18,14 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import time
-from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
+from typing import Any, Callable, Dict, Tuple
+try:
+    # Python 3.10+
+    from typing import Concatenate, ParamSpec
+except ImportError:
+    # Python <3.10
+    from typing_extensions import Concatenate, ParamSpec
+
 from absl import logging
 import flax
 from flax import nnx
