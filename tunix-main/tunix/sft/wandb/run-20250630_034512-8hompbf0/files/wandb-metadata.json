@@ -1,0 +1,44 @@
+{
+  "os":  "macOS-15.5-arm64-arm-64bit",
+  "python":  "CPython 3.10.18",
+  "startedAt":  "2025-06-30T07:45:13.280426Z",
+  "program":  "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft/run_sst2.py",
+  "codePath":  "tunix-main/tunix/sft/run_sst2.py",
+  "git":  {
+    "remote":  "https://github.com/VedanshiShah7/liu_lab_tunix_testing.git",
+    "commit":  "b5be98337a093045c9ac85efd67967f10422c673"
+  },
+  "email":  "vedanshiib@gmail.com",
+  "root":  "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft",
+  "host":  "Vedanshis-MacBook-Air.local",
+  "executable":  "/opt/anaconda3/envs/qwen3-sft/bin/python",
+  "codePathLocal":  "run_sst2.py",
+  "cpu_count":  8,
+  "cpu_count_logical":  8,
+  "disk":  {
+    "/":  {
+      "total":  "494384795648",
+      "used":  "417151520768"
+    },
+    "/System/Volumes/Data":  {
+      "total":  "494384795648",
+      "used":  "417151520768"
+    }
+  },
+  "memory":  {
+    "total":  "17179869184"
+  },
+  "cpu":  {
+    "count":  8,
+    "countLogical":  8
+  },
+  "apple":  {
+    "name":  "Apple M3",
+    "ecpuCores":  4,
+    "pcpuCores":  4,
+    "gpuCores":  10,
+    "memoryGb":  16,
+    "swapTotalBytes":  "17179869184",
+    "ramTotalBytes":  "17179869184"
+  }
+}

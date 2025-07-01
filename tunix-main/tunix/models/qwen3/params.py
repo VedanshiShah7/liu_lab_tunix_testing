@@ -49,6 +49,23 @@ def _stack_experts(params: dict[str, jax.Array]):
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
   return {
+      r"transformer\.h\.([0-9]+)\.attn\.q_proj\.weight": (
+      r"layers.\1.attn.q_proj.w",
+      ((1, 0), (cfg.embed_dim, cfg.num_heads, cfg.head_dim)),
+      ),
+      r"transformer\.h\.([0-9]+)\.attn\.k_proj\.weight": (
+          r"layers.\1.attn.k_proj.w",
+          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
+      ),
+      r"transformer\.h\.([0-9]+)\.attn\.v_proj\.weight": (
+          r"layers.\1.attn.v_proj.w",
+          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
+      ),
+      r"transformer\.h\.([0-9]+)\.attn\.o_proj\.weight": (
+          r"layers.\1.attn.o_proj.w",
+          ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
+        ),
+
       r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
       # attention projection weights
       r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
@@ -127,7 +144,8 @@ def _torch_key_to_jax_key(mapping, source_key):
       if re.match(pat, source_key)
   ]
   if len(subs) != 1:
-    raise ValueError(f"Only one key should be found: {subs[0]}")
+    print(f"❌ Missing mapping for Hugging Face key: {source_key}")
+    raise ValueError(f"No matching JAX key found for: {source_key}")
   else:
     return subs[0]
 
@@ -166,7 +184,6 @@ def _stoi(s):
     return int(s)
   except ValueError:
     return s
-
 
 def create_model_from_safe_tensors(
     file_dir: str,

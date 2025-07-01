@@ -1,0 +1,15 @@
+{"time":"2025-06-30T03:45:13.282852-04:00","level":"INFO","msg":"stream: starting","core version":"0.20.1","symlink path":"/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft/wandb/run-20250630_034512-8hompbf0/logs/debug-core.log"}
+{"time":"2025-06-30T03:45:13.985281-04:00","level":"INFO","msg":"stream: created new stream","id":"8hompbf0"}
+{"time":"2025-06-30T03:45:13.985401-04:00","level":"INFO","msg":"stream: started","id":"8hompbf0"}
+{"time":"2025-06-30T03:45:13.985725-04:00","level":"INFO","msg":"handler: started","stream_id":"8hompbf0"}
+{"time":"2025-06-30T03:45:13.985739-04:00","level":"INFO","msg":"writer: Do: started","stream_id":"8hompbf0"}
+{"time":"2025-06-30T03:45:13.985775-04:00","level":"INFO","msg":"sender: started","stream_id":"8hompbf0"}
+{"time":"2025-06-30T03:45:14.396221-04:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-06-30T04:26:58.581488-04:00","level":"INFO","msg":"stream: closing","id":"8hompbf0"}
+{"time":"2025-06-30T04:26:58.583624-04:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-06-30T04:26:58.584682-04:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-06-30T04:26:59.430421-04:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-06-30T04:26:59.752159-04:00","level":"INFO","msg":"handler: closed","stream_id":"8hompbf0"}
+{"time":"2025-06-30T04:26:59.752293-04:00","level":"INFO","msg":"sender: closed","stream_id":"8hompbf0"}
+{"time":"2025-06-30T04:26:59.752724-04:00","level":"INFO","msg":"writer: Close: closed","stream_id":"8hompbf0"}
+{"time":"2025-06-30T04:26:59.753189-04:00","level":"INFO","msg":"stream: closed","id":"8hompbf0"}

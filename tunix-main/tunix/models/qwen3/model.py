@@ -100,6 +100,21 @@ class ModelConfig:
         norm_eps=1e-06,
         rope_theta=1_000_000,
     )
+  
+  @classmethod
+  def qwen3_1_8_b(cls):  # HF Qwen-1_8B compatible
+      return cls(
+          num_layers=24,             # from HF Qwen docs
+          vocab_size=151936,
+          embed_dim=2048,
+          hidden_dim=8192,
+          num_heads=16,
+          head_dim=128,
+          num_kv_heads=4,
+          norm_eps=1e-6,
+          rope_theta=1_000_000,
+      )
+
 
   @classmethod
   def qwen3_1_7_b(cls):  # qwen3-1.7B

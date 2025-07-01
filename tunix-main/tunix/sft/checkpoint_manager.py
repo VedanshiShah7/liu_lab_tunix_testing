@@ -139,3 +139,9 @@ class CheckpointManager:
     if self._checkpoint_manager is None:
       return
     self._checkpoint_manager.close()
+from safetensors.flax import save_file
+
+def save_checkpoint(path, state_dict):
+    """Save model parameters to a safetensors file."""
+    save_file(state_dict, path)
+    print(f"✅ Checkpoint saved to {path}")

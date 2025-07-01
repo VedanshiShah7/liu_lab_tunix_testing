@@ -184,3 +184,6 @@ class MetricsLogger:
         summary_writer.close()
     if wandb is not None:
       wandb.finish()
+  
+def log_metrics(epoch: int, step: int, metrics: dict):
+    print(f"[Epoch {epoch} | Step {step}] " + " | ".join(f"{k}: {v:.4f}" for k, v in metrics.items()))

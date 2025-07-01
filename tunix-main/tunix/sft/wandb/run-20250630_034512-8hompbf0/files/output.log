@@ -1,0 +1,22 @@
+  0%|                                                                                                                                   | 0/12630 [00:00<?, ?it/s]/opt/anaconda3/envs/qwen3-sft/lib/python3.10/site-packages/torch/utils/data/dataloader.py:683: UserWarning: 'pin_memory' argument is set as true but not supported on MPS now, then device pinned memory won't be used.
+  warnings.warn(warn_msg)
+ 16%|█████▌                            | 2059/12630 [41:42<4:10:32,  1.42s/it]Traceback (most recent call last):                                                  
+  File "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft/run_sst2.py", line 150, in <module>
+    main()
+  File "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft/run_sst2.py", line 95, in main
+    trainer.train()
+  File "/opt/anaconda3/envs/qwen3-sft/lib/python3.10/site-packages/transformers/trainer.py", line 2207, in train
+    return inner_training_loop(
+  File "/opt/anaconda3/envs/qwen3-sft/lib/python3.10/site-packages/transformers/trainer.py", line 2554, in _inner_training_loop
+    and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft/run_sst2.py", line 150, in <module>
+    main()
+  File "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/tunix/sft/run_sst2.py", line 95, in main
+    trainer.train()
+  File "/opt/anaconda3/envs/qwen3-sft/lib/python3.10/site-packages/transformers/trainer.py", line 2207, in train
+    return inner_training_loop(
+  File "/opt/anaconda3/envs/qwen3-sft/lib/python3.10/site-packages/transformers/trainer.py", line 2554, in _inner_training_loop
+    and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
+KeyboardInterrupt
