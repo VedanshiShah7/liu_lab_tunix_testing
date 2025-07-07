@@ -1,150 +1,149 @@
+#!/usr/bin/env python3
+"""
+run_sst2_tunix.py
+
+Fine-tune DistilBERT on SST-2 with HuggingFace’s FlaxTrainer (JAX+TPU).
+"""
+
 import os
-import jax
-import jax.numpy as jnp
-from datasets import load_dataset
-from transformers import AutoTokenizer, FlaxAutoModelForSequenceClassification
-import optax
-from tunix.sft.peft_trainer import PeftTrainer, TrainingConfig
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-# Optional: Estimate FLOPs & parameter count via PyTorch + ptflops
 import torch
-from transformers import AutoModelForSequenceClassification
+
+from datasets import load_dataset
+from evaluate import load as load_metric
 from ptflops import get_model_complexity_info
 
+from transformers import (
+    AutoTokenizer,
+    FlaxAutoModelForSequenceClassification,
+    FlaxTrainingArguments,
+    FlaxTrainer,
+    DataCollatorWithPadding,
+)
+
 def estimate_flops():
-    model_pt = AutoModelForSequenceClassification.from_pretrained(
+    """Estimate FLOPs via PyTorch + ptflops."""
+    pt_model = AutoModelForSequenceClassification.from_pretrained(
         "distilbert-base-uncased", num_labels=2
     )
-    def dummy_input_constructor(resolution):
-        batch_size, seq_len = resolution
+    def dummy_input(res):
+        bs, sl = res
         return {
-            "input_ids": torch.zeros((batch_size, seq_len), dtype=torch.long),
-            "attention_mask": torch.ones((batch_size, seq_len), dtype=torch.long),
+            "input_ids":      torch.zeros(bs, sl, dtype=torch.long),
+            "attention_mask": torch.ones(bs, sl, dtype=torch.long),
         }
-
     macs, params = get_model_complexity_info(
-        model_pt,
-        (1, 128),
-        input_constructor=dummy_input_constructor,
+        pt_model, (1,128),
+        input_constructor=dummy_input,
         as_strings=False,
         print_per_layer_stat=False,
         verbose=False,
     )
-    flops = 2 * macs
-    print(f"Estimated FLOPs (fwd+backward, batch=1, len=128): {flops:,}")
+    print(f"\nEstimated FLOPs (fwd+backward): {2*macs:,}")
     print(f"Parameter count: {params:,}\n")
 
-
 def main():
-    # 0. (Optional) Compute and report model FLOPs & size
+    # 0) FLOPs
     estimate_flops()
 
-    # 1. Load and tokenize the SST-2 dataset
-    raw = load_dataset("glue", "sst2")
-    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+    # 1) Load dataset & metric
+    ds     = load_dataset("glue", "sst2")
+    metric = load_metric("glue", "sst2")
 
-    def tokenize_fn(examples):
+    # 2) Tokenizer & model
+    MODEL = "distilbert-base-uncased"
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    model     = FlaxAutoModelForSequenceClassification.from_pretrained(MODEL, num_labels=2)
+
+    # 3) Preprocess
+    def tokenize_fn(ex):
         return tokenizer(
-            examples["sentence"],
+            ex["sentence"],
             padding="max_length",
             truncation=True,
             max_length=128
         )
-    tokenized = raw.map(tokenize_fn, batched=True)
+    tokenized = ds.map(tokenize_fn, batched=True)
+    train_ds = tokenized["train"]
+    val_ds   = tokenized["validation"]
+    test_ds  = tokenized["test"].remove_columns("label")
 
-    # 2. Prepare JAX-friendly datasets
-    train_ds = tokenized["train"].with_format("numpy")
-    val_ds   = tokenized["validation"].with_format("numpy")
-    # SST-2 test split contains dummy labels (-1), so drop before prediction
-    test_ds  = tokenized["test"].remove_columns("label").with_format("numpy")
-
-    # 3. Load a Flax model for sequence classification
-    model = FlaxAutoModelForSequenceClassification.from_pretrained(
-        "distilbert-base-uncased",
-        num_labels=2
+    # 4) Training args
+    args = FlaxTrainingArguments(
+        output_dir="tunix_sst2_ckpts",
+        num_train_epochs=3,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=32,
+        learning_rate=5e-5,
+        weight_decay=0.01,
+        logging_strategy="epoch",
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="accuracy",
     )
 
-    # 4. Configure TUNiX training
-    total_steps = len(train_ds) * 3  # epochs = 3
-    config = TrainingConfig(
-        max_steps=total_steps,
-        eval_every_n_steps=len(train_ds),  # one evaluation per epoch
-        checkpoint_root_directory="tunix_sst2_ckpts"
-    )
+    # 5) Data collator & metrics
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    def compute_metrics(eval_pred):
+        logits, labels = eval_pred
+        preds = np.argmax(logits, axis=-1)
+        return metric.compute(predictions=preds, references=labels)
 
-    # 5. Define input function mapping dataset to model inputs
-    def input_fn(batch):
-        inputs = {
-            "input_ids": batch["input_ids"],
-            "attention_mask": batch["attention_mask"]
-        }
-        # only include labels for train/val
-        if "label" in batch:
-            inputs["labels"] = batch["label"]
-        return inputs
-
-    # 6. Initialize the Trainer
-    trainer = PeftTrainer(
+    # 6) Trainer
+    trainer = FlaxTrainer(
         model=model,
-        optimizer=optax.adamw(5e-5),
-        config=config
-    ).with_gen_model_input_fn(input_fn)
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+    )
 
-    # 7. Train and evaluate
-    trainer.train(train_ds, val_ds)
-    metrics = trainer.evaluate(val_ds)
-    print("Validation metrics:", metrics)
+    # 7) Train & evaluate
+    trainer.train()
+    val_metrics = trainer.evaluate()
+    print("Validation metrics:", val_metrics)
 
-    # 8. Predict on the test split
-    preds = trainer.predict(test_ds).predictions.argmax(-1)
-    os.makedirs(config.checkpoint_root_directory, exist_ok=True)
-    out_path = os.path.join(config.checkpoint_root_directory, "sst2_test_preds.txt")
-    with open(out_path, "w") as f:
+    # 8) Test predictions
+    test_out = trainer.predict(test_ds)
+    preds    = np.argmax(test_out.predictions, axis=-1)
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(f"{args.output_dir}/sst2_test_preds.txt", "w") as f:
         for p in preds:
             f.write(f"{p}\n")
-    print(f"Test predictions saved to {out_path}")
+    print("Test predictions saved.")
 
-    # 9. Extract training history and plot metrics
-    history = getattr(trainer.state, 'log_history', [])
-    train_logs = [h for h in history if "loss" in h and "eval_loss" not in h]
-    val_logs   = [h for h in history if "eval_loss" in h]
+    # 9) Plot history
+    history   = trainer.state.log_history
+    train_log = [h for h in history if "loss" in h and "eval_loss" not in h]
+    val_log   = [h for h in history if "eval_loss" in h]
 
-    df_train = pd.DataFrame({
-        "epoch": [h.get("epoch") for h in train_logs],
-        "train_loss": [h.get("loss") for h in train_logs]
+    df_tr = pd.DataFrame({
+        "epoch":      [h["epoch"] for h in train_log],
+        "train_loss": [h["loss"]  for h in train_log],
     })
-    df_val = pd.DataFrame({
-        "epoch": [h.get("epoch") for h in val_logs],
-        "val_loss": [h.get("eval_loss") for h in val_logs],
-        "val_accuracy": [h.get("eval_accuracy") for h in val_logs]
+    df_vl = pd.DataFrame({
+        "epoch":        [h["epoch"]         for h in val_log],
+        "val_loss":     [h["eval_loss"]     for h in val_log],
+        "val_accuracy": [h["eval_accuracy"] for h in val_log],
     })
 
-    # Plot Loss Curve
     plt.figure()
-    plt.plot(df_train["epoch"], df_train["train_loss"], label="Train Loss")
-    plt.plot(df_val["epoch"],   df_val["val_loss"],    label="Val Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training vs. Validation Loss")
-    plt.legend()
-    loss_path = os.path.join(config.checkpoint_root_directory, "loss_curve.png")
-    plt.savefig(loss_path)
-    plt.close()
-    print(f"Loss curve saved to {loss_path}")
+    plt.plot(df_tr.epoch, df_tr.train_loss, label="Train Loss")
+    plt.plot(df_vl.epoch, df_vl.val_loss,   label="Val Loss")
+    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend()
+    plt.savefig(f"{args.output_dir}/loss_curve.png"); plt.close()
 
-    # Plot Accuracy Curve  
     plt.figure()
-    plt.plot(df_val["epoch"], df_val["val_accuracy"], label="Val Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.title("Validation Accuracy per Epoch")
-    plt.legend()
-    acc_path = os.path.join(config.checkpoint_root_directory, "accuracy_curve.png")
-    plt.savefig(acc_path)
-    plt.close()
-    print(f"Accuracy curve saved to {acc_path}")
+    plt.plot(df_vl.epoch, df_vl.val_accuracy, label="Val Accuracy")
+    plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.legend()
+    plt.savefig(f"{args.output_dir}/accuracy_curve.png"); plt.close()
+
+    print("Plots saved.")
 
 if __name__ == "__main__":
     main()

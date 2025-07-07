@@ -1,0 +1,23 @@
+ 17%|████                    | 181/1069 [05:05<56:10,  3.80s/it]Traceback (most recent call last):
+  File "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/run_all_glue.py", line 144, in <module>
+    fine_tune_and_predict(t)
+  File "/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/run_all_glue.py", line 122, in fine_tune_and_predict
+    trainer.train()
+  File "/opt/anaconda3/lib/python3.12/site-packages/transformers/trainer.py", line 1885, in train
+    return inner_training_loop(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/transformers/trainer.py", line 2216, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.12/site-packages/transformers/trainer.py", line 3250, in training_step
+    self.accelerator.backward(loss)
+  File "/opt/anaconda3/lib/python3.12/site-packages/accelerate/accelerator.py", line 2473, in backward
+    loss.backward(**kwargs)
+  File "/opt/anaconda3/lib/python3.12/site-packages/torch/_tensor.py", line 648, in backward
+    torch.autograd.backward(
+  File "/opt/anaconda3/lib/python3.12/site-packages/torch/autograd/__init__.py", line 353, in backward
+    _engine_run_backward(
+  File "/opt/anaconda3/lib/python3.12/site-packages/torch/autograd/graph.py", line 824, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

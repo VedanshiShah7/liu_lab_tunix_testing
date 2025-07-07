@@ -1,0 +1,15 @@
+{"time":"2025-07-01T13:25:44.525779-04:00","level":"INFO","msg":"stream: starting","core version":"0.19.8","symlink path":"/Users/vedanshi/Documents/GitHub/liu_lab_tunix_testing/tunix-main/wandb/run-20250701_132544-zr25ljn7/logs/debug-core.log"}
+{"time":"2025-07-01T13:25:44.684421-04:00","level":"INFO","msg":"created new stream","id":"zr25ljn7"}
+{"time":"2025-07-01T13:25:44.684501-04:00","level":"INFO","msg":"stream: started","id":"zr25ljn7"}
+{"time":"2025-07-01T13:25:44.684949-04:00","level":"INFO","msg":"writer: Do: started","stream_id":"zr25ljn7"}
+{"time":"2025-07-01T13:25:44.684898-04:00","level":"INFO","msg":"handler: started","stream_id":"zr25ljn7"}
+{"time":"2025-07-01T13:25:44.685119-04:00","level":"INFO","msg":"sender: started","stream_id":"zr25ljn7"}
+{"time":"2025-07-01T13:25:45.124203-04:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-07-01T13:30:54.448382-04:00","level":"INFO","msg":"stream: closing","id":"zr25ljn7"}
+{"time":"2025-07-01T13:30:54.448613-04:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-07-01T13:30:54.451317-04:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-07-01T13:30:56.834615-04:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-07-01T13:30:57.673062-04:00","level":"INFO","msg":"writer: Close: closed","stream_id":"zr25ljn7"}
+{"time":"2025-07-01T13:30:57.673281-04:00","level":"INFO","msg":"handler: closed","stream_id":"zr25ljn7"}
+{"time":"2025-07-01T13:30:57.673327-04:00","level":"INFO","msg":"sender: closed","stream_id":"zr25ljn7"}
+{"time":"2025-07-01T13:30:57.673431-04:00","level":"INFO","msg":"stream: closed","id":"zr25ljn7"}
